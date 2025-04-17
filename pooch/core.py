@@ -30,6 +30,54 @@ from .utils import (
 from .downloaders import DOIDownloader, choose_downloader, doi_to_repository
 from .typing import PathType, PathInputType, Processor, Downloader, Action
 
+def _download_file(
+    url: str,
+    full_path: Path,
+    known_hash: Optional[str],
+    downloader: Optional[Downloader],
+    progressbar: bool = False,
+    pooch: Optional[Pooch] = None,
+    retry_if_failed: int = 0,
+) -> str:
+    """
+    Shared internal logic for downloading a file, used in both retrieve() and Pooch.fetch().
+
+    Handles:
+    - Creating storage directory if needed
+    - Choosing the downloader if not provided
+    - Logging the download/update action
+    - Performing the download via stream_download
+    - Logging the hash if known_hash is None
+
+    Returns the path to the downloaded file.
+    """
+    action, verb = download_action(full_path, known_hash)
+    if action in ("download", "update"):
+        make_local_storage(full_path.parent)
+        get_logger().info(
+            "%s file from '%s' to '%s'.", verb, url, str(full_path)
+        )
+        if downloader is None:
+            downloader = choose_downloader(url, progressbar=progressbar)
+
+        stream_download(
+            url,
+            full_path,
+            known_hash,
+            downloader,
+            pooch=pooch,
+            retry_if_failed=retry_if_failed,
+        )
+
+        if known_hash is None:
+            get_logger().info(
+                "SHA256 hash of downloaded file: %s\n"
+                "Use this value as the 'known_hash' argument of 'pooch.retrieve'"
+                " to ensure that the file hasn't changed if it is downloaded again"
+                " in the future.",
+                file_hash(str(full_path)),
+            )
+    return action
 
 def retrieve(
     url: str,
@@ -218,43 +266,23 @@ def retrieve(
         path = os_cache("pooch")
     if fname is None:
         fname = unique_file_name(url)
-    # Make the path absolute.
     path = cache_location(path, env=None, version=None)
-
     full_path = path.resolve() / fname
-    action, verb = download_action(full_path, known_hash)
 
-    if action in ("download", "update"):
-        # We need to write data, so create the local data directory if it
-        # doesn't already exist.
-        make_local_storage(path)
-
-        get_logger().info(
-            "%s data from '%s' to file '%s'.",
-            verb,
-            url,
-            str(full_path),
-        )
-
-        if downloader is None:
-            downloader = choose_downloader(url, progressbar=progressbar)
-
-        stream_download(url, full_path, known_hash, downloader, pooch=None)
-
-        if known_hash is None:
-            get_logger().info(
-                "SHA256 hash of downloaded file: %s\n"
-                "Use this value as the 'known_hash' argument of 'pooch.retrieve'"
-                " to ensure that the file hasn't changed if it is downloaded again"
-                " in the future.",
-                file_hash(str(full_path)),
-            )
+    action = _download_file(
+        url,
+        full_path,
+        known_hash,
+        downloader,
+        progressbar=progressbar,
+        pooch=None,
+        retry_if_failed=0,
+    )
 
     if processor is not None:
         return processor(str(full_path), action, None)
 
     return str(full_path)
-
 
 def create(
     path: PathInputType,
@@ -580,26 +608,12 @@ class Pooch:
             )
 
         if action in ("download", "update"):
-            # We need to write data, so create the local data directory if it
-            # doesn't already exist.
-            make_local_storage(str(self.abspath))
-
-            get_logger().info(
-                "%s file '%s' from '%s' to '%s'.",
-                verb,
-                fname,
-                url,
-                str(self.abspath),
-            )
-
-            if downloader is None:
-                downloader = choose_downloader(url, progressbar=progressbar)
-
-            stream_download(
+            _download_file(
                 url,
                 full_path,
                 known_hash,
                 downloader,
+                progressbar=progressbar,
                 pooch=self,
                 retry_if_failed=self.retry_if_failed,
             )
